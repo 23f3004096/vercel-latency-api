@@ -1,46 +1,54 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import json
 
 app = FastAPI()
 
+# ✅ Enable CORS for ALL origins (required for the exam portal)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST"],
-    allow_headers=["*"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["*"]
 )
 
+# Load telemetry file once at startup
 DATA_PATH = Path(__file__).parent / "q-vercel-latency.json"
-df = pd.read_json(DATA_PATH)
+with open(DATA_PATH, "r") as f:
+    TELEMETRY = pd.DataFrame(json.load(f))
 
 
 @app.post("/")
-async def latency_report(request: Request):
-    payload = await request.json()
-    regions = payload.get("regions", [])
-    threshold = payload.get("threshold_ms", 0)
+async def latency_endpoint(request: Request):
+    body = await request.json()
+    regions = body.get("regions", [])
+    threshold = body.get("threshold_ms", 999999)
 
-    result = {}
+    df = TELEMETRY[TELEMETRY["region"].isin(regions)].copy()
 
-    for region in regions:
-        sub = df[df["region"] == region]
-        if sub.empty:
-            continue
+    # Compute metrics
+    df["breach"] = df["latency_ms"] > threshold
 
-        avg_latency = sub["latency_ms"].mean()
-        p95_latency = np.percentile(sub["latency_ms"], 95)
-        avg_uptime = sub["uptime_pct"].mean()
-        breaches = (sub["latency_ms"] > threshold).sum()
+    result = (
+        df.groupby("region")
+        .agg(
+            avg_latency=("latency_ms", "mean"),
+            p95_latency=("latency_ms", lambda x: np.percentile(x, 95)),
+            avg_uptime=("uptime_pct", "mean"),
+            breaches=("breach", "sum")
+        )
+        .round(3)
+        .reset_index()
+        .to_dict(orient="records")
+    )
 
-        result[region] = {
-            "avg_latency": round(avg_latency, 2),
-            "p95_latency": round(p95_latency, 2),
-            "avg_uptime": round(avg_uptime, 3),
-            "breaches": int(breaches),
-        }
+    return {"results": result}
 
-    return result
+
+@app.options("/")
+async def options_handler():
+    """Preflight CORS handler"""
+    return {"message": "OK"}
